@@ -1059,7 +1059,7 @@ func compactWriteToolInput(input map[string]any) map[string]any {
 	for k, v := range input {
 		out[k] = v
 	}
-	out["content"] = fmt.Sprintf("[File written: %s — %d chars]", filePath, len(content))
+	out["content"] = fmt.Sprintf("[File written: %s — %d chars. Please read the file for proper content before writing again.]", filePath, len(content))
 	return out
 }
 

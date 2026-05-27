@@ -1,0 +1,7 @@
+# GitHub automatically enables private vulnerability reporting when this file exists.
+# See: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability
+
+contact_links:
+  - name: Security Policy
+    url: https://github.com/chasedputnam/go-kiro-gateway/blob/main/SECURITY.md
+    about: Please review our security policy before reporting a vulnerability.
