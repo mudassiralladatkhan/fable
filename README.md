@@ -337,6 +337,7 @@ When `BACKEND_MODE=acp` the gateway:
 | **kiro-cli required** | No | Yes |
 | **Retry logic** | Full (403 refresh, 429 backoff, 5xx backoff) | Basic (session-level) |
 | **Model listing** | From Kiro API at startup | Same (cached from startup) |
+| **Docker Support** | Yes | No (Container does not have Kiro CLI installed) |
 
 ---
 
