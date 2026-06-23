@@ -49,6 +49,35 @@ func setCredentialSource(t *testing.T) {
 // 1. Default values
 // ---------------------------------------------------------------------------
 
+func TestLoad_ACPMaxIdleSessions(t *testing.T) {
+	origArgs := os.Args
+	os.Args = []string{"gateway"}
+	defer func() { os.Args = origArgs }()
+
+	// Default is 8.
+	clearConfigEnvVars(t)
+	setCredentialSource(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ACPMaxIdleSessions != 8 {
+		t.Errorf("ACPMaxIdleSessions default = %d, want 8", cfg.ACPMaxIdleSessions)
+	}
+
+	// Override (0 disables reuse).
+	clearConfigEnvVars(t)
+	setCredentialSource(t)
+	t.Setenv("ACP_MAX_IDLE_SESSIONS", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ACPMaxIdleSessions != 0 {
+		t.Errorf("ACPMaxIdleSessions = %d, want 0", cfg.ACPMaxIdleSessions)
+	}
+}
+
 func TestLoad_DefaultValues(t *testing.T) {
 	clearConfigEnvVars(t)
 	setCredentialSource(t)

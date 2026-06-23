@@ -325,8 +325,14 @@ When `BACKEND_MODE=acp` the gateway:
 1. Locates `kiro-cli` (via `KIRO_CLI_PATH` or your system `PATH`)
 2. Spawns `kiro-cli acp` as a subprocess at startup
 3. Performs the ACP `initialize` handshake
-4. For each incoming chat completion request, creates a new ACP session (`session/new`), sets the requested model (`session/set_model`), sends the prompt (`session/prompt`), and streams `AgentMessageChunk` notifications back to the client as SSE
+4. For each incoming chat completion request, creates a new ACP session (`session/new`), selects the requested model via kiro-cli's `/model` slash command (kiro-cli has no `session/set_model` method), sends the prompt (`session/prompt`), and streams `agent_message_chunk` updates back to the client as SSE until the prompt response returns with a `stopReason`
 5. Terminates the subprocess on graceful shutdown
+
+> **kiro-cli 2.8.x compatibility (issue #21):** The ACP backend speaks Agent Client Protocol **v1** — `initialize` sends an integer `protocolVersion: 1`, `session/new` includes the required `cwd` and `mcpServers` fields, prompts are sent in the `prompt` field, and streamed updates arrive as `session/update` notifications keyed by `sessionUpdate`. Earlier builds used a guessed protocol shape, which caused `session/new` to be accepted but the subprocess to exit silently with no response. If you see that symptom, make sure you're on a build that includes this fix.
+>
+> Model selection uses kiro-cli's `/model` slash command rather than a `session/set_model` method (which kiro-cli doesn't implement and which crashes the subprocess). Gateway model IDs are mapped to kiro-cli's dotted naming (`claude-sonnet-4-6` → `claude-sonnet-4.6`). If the requested model isn't available on your account, the gateway logs a warning and falls back to the session default.
+>
+> **Session reuse:** the backend keeps warm kiro-cli sessions in an idle pool keyed by model and reuses them across requests, wiping prior context with `/clear` on checkout. This skips the expensive `session/new` (MCP init, ≈3.7s) and `/model` selection — in practice a follow-up request completes in roughly a third of the time of the first. Pool size is controlled by `ACP_MAX_IDLE_SESSIONS` (default `8`); set it to `0` to disable reuse and create a fresh session per request.
 
 ### Choosing between HTTP and ACP mode
 

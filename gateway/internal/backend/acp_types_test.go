@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseUpdate_AgentMessageChunk(t *testing.T) {
-	raw := json.RawMessage(`{"type":"AgentMessageChunk","content":"hello world"}`)
+	raw := json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello world"}}`)
 	v, err := ParseUpdate(raw)
 	if err != nil {
 		t.Fatalf("ParseUpdate error: %v", err)
@@ -16,13 +16,13 @@ func TestParseUpdate_AgentMessageChunk(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *AgentMessageChunk, got %T", v)
 	}
-	if chunk.Content != "hello world" {
-		t.Errorf("Content = %q, want %q", chunk.Content, "hello world")
+	if chunk.Content.Text != "hello world" {
+		t.Errorf("Content.Text = %q, want %q", chunk.Content.Text, "hello world")
 	}
 }
 
 func TestParseUpdate_ToolCall(t *testing.T) {
-	raw := json.RawMessage(`{"type":"ToolCall","name":"read_file","params":{},"status":"running"}`)
+	raw := json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"read_file","kind":"read","status":"in_progress"}`)
 	v, err := ParseUpdate(raw)
 	if err != nil {
 		t.Fatalf("ParseUpdate error: %v", err)
@@ -31,16 +31,19 @@ func TestParseUpdate_ToolCall(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *ToolCallNotification, got %T", v)
 	}
-	if tc.Name != "read_file" {
-		t.Errorf("Name = %q, want %q", tc.Name, "read_file")
+	if tc.Title != "read_file" {
+		t.Errorf("Title = %q, want %q", tc.Title, "read_file")
 	}
-	if tc.Status != "running" {
-		t.Errorf("Status = %q, want %q", tc.Status, "running")
+	if tc.ToolCallID != "call_1" {
+		t.Errorf("ToolCallID = %q, want %q", tc.ToolCallID, "call_1")
+	}
+	if tc.Status != "in_progress" {
+		t.Errorf("Status = %q, want %q", tc.Status, "in_progress")
 	}
 }
 
 func TestParseUpdate_ToolCallUpdate(t *testing.T) {
-	raw := json.RawMessage(`{"type":"ToolCallUpdate","name":"read_file","status":"complete"}`)
+	raw := json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed"}`)
 	v, err := ParseUpdate(raw)
 	if err != nil {
 		t.Fatalf("ParseUpdate error: %v", err)
@@ -49,28 +52,21 @@ func TestParseUpdate_ToolCallUpdate(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *ToolCallUpdate, got %T", v)
 	}
-	if tcu.Status != "complete" {
-		t.Errorf("Status = %q, want %q", tcu.Status, "complete")
+	if tcu.Status != "completed" {
+		t.Errorf("Status = %q, want %q", tcu.Status, "completed")
 	}
 }
 
-func TestParseUpdate_TurnEnd(t *testing.T) {
-	raw := json.RawMessage(`{"type":"TurnEnd"}`)
+// Unhandled variants (e.g. agent_thought_chunk, plan) are skipped, not errored,
+// so future ACP additions don't break the stream.
+func TestParseUpdate_UnhandledVariantSkipped(t *testing.T) {
+	raw := json.RawMessage(`{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking"}}`)
 	v, err := ParseUpdate(raw)
 	if err != nil {
 		t.Fatalf("ParseUpdate error: %v", err)
 	}
-	_, ok := v.(*TurnEndNotification)
-	if !ok {
-		t.Fatalf("expected *TurnEndNotification, got %T", v)
-	}
-}
-
-func TestParseUpdate_UnknownType(t *testing.T) {
-	raw := json.RawMessage(`{"type":"SomeFutureType","data":"x"}`)
-	_, err := ParseUpdate(raw)
-	if err == nil {
-		t.Error("expected error for unknown type, got nil")
+	if v != nil {
+		t.Errorf("expected nil for unhandled variant, got %T", v)
 	}
 }
 
@@ -82,10 +78,13 @@ func TestParseUpdate_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestParseUpdate_MissingTypeField(t *testing.T) {
-	raw := json.RawMessage(`{"content":"hello"}`)
-	_, err := ParseUpdate(raw)
-	if err == nil {
-		t.Error("expected error when type field is missing/empty, got nil")
+func TestParseUpdate_MissingDiscriminatorSkipped(t *testing.T) {
+	raw := json.RawMessage(`{"content":{"type":"text","text":"hello"}}`)
+	v, err := ParseUpdate(raw)
+	if err != nil {
+		t.Fatalf("ParseUpdate error: %v", err)
+	}
+	if v != nil {
+		t.Errorf("expected nil when discriminator is missing, got %T", v)
 	}
 }

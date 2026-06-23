@@ -77,9 +77,10 @@ type Config struct {
 	TokenRefreshThreshold    time.Duration
 
 	// ACP backend
-	BackendMode string
-	KiroCLIPath string
-	ACPAgent    string
+	BackendMode        string
+	KiroCLIPath        string
+	ACPAgent           string
+	ACPMaxIdleSessions int
 
 	// App
 	Version     string
@@ -116,6 +117,7 @@ func Load() (*Config, error) {
 	cfg.BackendMode = envEnum("BACKEND_MODE", "http", []string{"http", "acp"})
 	cfg.KiroCLIPath = normalizePath(envStr("KIRO_CLI_PATH", ""))
 	cfg.ACPAgent = envStr("ACP_AGENT", "")
+	cfg.ACPMaxIdleSessions = envInt("ACP_MAX_IDLE_SESSIONS", 8)
 
 	cfg.VPNProxyURL = envStr("VPN_PROXY_URL", "")
 
