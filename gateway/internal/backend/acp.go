@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +42,10 @@ type ACPBackend struct {
 	nextID  atomic.Int64            // monotonically increasing request IDs
 	pending sync.Map                // int64 → chan *rpcMessage (in-flight requests)
 	notifs  sync.Map                // string (sessionID) → chan *SessionNotification
+
+	poolMu      sync.Mutex          // guards idleByModel
+	idleByModel map[string][]string // kiro model id ("" = default) → idle session IDs
+	maxIdle     int                 // max idle sessions per model; 0 disables reuse
 
 	done chan struct{} // closed when subprocess exits
 }
@@ -78,12 +83,14 @@ func NewACPBackend(cfg *config.Config) (*ACPBackend, error) {
 	}
 
 	b := &ACPBackend{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: bufio.NewReader(stdoutPipe),
-		cfg:    cfg,
-		logger: log.With().Str("component", "acp").Logger(),
-		done:   make(chan struct{}),
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      bufio.NewReader(stdoutPipe),
+		cfg:         cfg,
+		logger:      log.With().Str("component", "acp").Logger(),
+		idleByModel: make(map[string][]string),
+		maxIdle:     cfg.ACPMaxIdleSessions,
+		done:        make(chan struct{}),
 	}
 
 	// Capture stderr and log at WARN level.
@@ -139,46 +146,88 @@ func (b *ACPBackend) Complete(ctx context.Context, req *Request) (<-chan streami
 	default:
 	}
 
-	// 1. Create a new session.
-	sessionID, err := b.sessionNew(ctx)
+	// 1. Check out a session for the target model — a cleared idle session from
+	//    the pool, or a freshly created one with the model selected.
+	key := modelKey(req.Model)
+	sessionID, poolKey, reused, err := b.checkoutSession(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("acp: session/new failed: %w", err)
+		return nil, err
 	}
 
-	// 2. Set model (best-effort, warn on failure).
-	if req.Model != "" {
-		if err := b.sessionSetModel(ctx, sessionID, req.Model); err != nil {
-			b.logger.Warn().Err(err).Str("model", req.Model).Msg("session/set_model failed, using default")
-		}
-	}
-
-	// 3. Subscribe to notifications for this session.
+	// 3. Subscribe to notifications BEFORE sending the prompt so no streamed
+	//    updates are missed. notifCh is not closed here — the drain goroutine is
+	//    its only reader and dispatchLoop sends non-blocking, so deleting it from
+	//    the map (below) is enough to stop delivery without risking a
+	//    send-on-closed-channel panic.
 	notifCh := make(chan *SessionNotification, 64)
 	b.notifs.Store(sessionID, notifCh)
 
-	// 4. Send the prompt.
 	promptText := extractPromptText(req.Payload)
 	if promptText == "" {
 		b.logger.Warn().Str("session_id", sessionID).Msg("ACP: extractPromptText returned empty string; sending empty prompt to kiro-cli")
 	}
-	if err := b.sessionPrompt(ctx, sessionID, promptText); err != nil {
-		b.notifs.Delete(sessionID)
-		close(notifCh)
-		return nil, fmt.Errorf("acp: session/prompt failed: %w", err)
-	}
 
-	// 5. Translate notifications to KiroEvents on a goroutine.
+	// 4. Issue session/prompt concurrently with the notification drain. The
+	//    prompt response carries stopReason and only returns after all updates
+	//    have streamed, so it must not be awaited ahead of reading updates.
+	type promptResult struct {
+		stopReason string
+		err        error
+	}
+	promptDone := make(chan promptResult, 1)
+	go func() {
+		stopReason, err := b.sessionPrompt(ctx, sessionID, promptText)
+		promptDone <- promptResult{stopReason: stopReason, err: err}
+	}()
+
+	// 5. Translate notifications to KiroEvents until the prompt turn completes.
 	events := make(chan streaming.KiroEvent, 64)
 	start := time.Now()
 	go func() {
 		defer close(events)
-		defer b.notifs.Delete(sessionID)
-		defer close(notifCh)
+		// Note: notifs.Delete(sessionID) is NOT deferred. It must run before the
+		// session is handed back to the pool (returnSession), otherwise a
+		// concurrent request that reuses this sessionID and re-registers its own
+		// notif channel could have it clobbered by a late delete here.
 
+		emit := func(notif *SessionNotification) {
+			update, err := ParseUpdate(notif.Update)
+			if err != nil {
+				b.logger.Warn().Err(err).Msg("skipping malformed ACP update")
+				return
+			}
+			if update == nil {
+				return // unhandled variant
+			}
+			switch u := update.(type) {
+			case *AgentMessageChunk:
+				events <- streaming.KiroEvent{
+					Type:    streaming.EventTypeContent,
+					Content: u.Content.Text,
+				}
+			case *ToolCallNotification:
+				if u.Status == "pending" || u.Status == "in_progress" {
+					events <- streaming.KiroEvent{
+						Type: streaming.EventTypeToolCall,
+						ToolCall: &streaming.ToolCallInfo{
+							ID:        u.ToolCallID,
+							Name:      u.Title,
+							Arguments: "{}",
+						},
+					}
+				}
+			case *ToolCallUpdate:
+				// Progress update — no KiroEvent equivalent, skip.
+			}
+		}
+
+		var res promptResult
+	loop:
 		for {
 			select {
 			case <-ctx.Done():
 				_ = b.sessionCancel(context.Background(), sessionID)
+				b.notifs.Delete(sessionID) // drop session (not pooled)
 				return
 
 			case <-b.done:
@@ -186,50 +235,51 @@ func (b *ACPBackend) Complete(ctx context.Context, req *Request) (<-chan streami
 					Type:  streaming.EventTypeError,
 					Error: fmt.Errorf("acp: kiro-cli subprocess exited unexpectedly"),
 				}
+				b.notifs.Delete(sessionID)
 				return
 
-			case notif, ok := <-notifCh:
-				if !ok {
-					return
-				}
-				update, err := ParseUpdate(notif.Update)
-				if err != nil {
-					b.logger.Warn().Err(err).Msg("skipping unknown ACP notification")
-					continue
-				}
+			case notif := <-notifCh:
+				emit(notif)
 
-				switch u := update.(type) {
-				case *AgentMessageChunk:
-					events <- streaming.KiroEvent{
-						Type:    streaming.EventTypeContent,
-						Content: u.Content,
-					}
-
-				case *ToolCallNotification:
-					if u.Status == "running" {
-						events <- streaming.KiroEvent{
-							Type: streaming.EventTypeToolCall,
-							ToolCall: &streaming.ToolCallInfo{
-								Name:      u.Name,
-								Arguments: string(u.Params),
-							},
-						}
-					}
-
-				case *ToolCallUpdate:
-					// Progress update — no KiroEvent equivalent, skip.
-
-				case *TurnEndNotification:
-					duration := time.Since(start)
-					b.logger.Info().
-						Str("session_id", sessionID).
-						Str("model", req.Model).
-						Dur("duration", duration).
-						Msg("ACP session complete")
-					return
-				}
+			case res = <-promptDone:
+				break loop
 			}
 		}
+
+		// Turn complete. dispatchLoop enqueues updates before the prompt
+		// response, so any updates belonging to this turn are already buffered —
+		// drain them non-blockingly before finishing.
+		for drained := false; !drained; {
+			select {
+			case notif := <-notifCh:
+				emit(notif)
+			default:
+				drained = true
+			}
+		}
+
+		if res.err != nil {
+			// Don't pool a session whose turn errored.
+			events <- streaming.KiroEvent{
+				Type:  streaming.EventTypeError,
+				Error: fmt.Errorf("acp: session/prompt failed: %w", res.err),
+			}
+			b.notifs.Delete(sessionID)
+			return
+		}
+
+		// Clean turn — deregister this turn's notif channel BEFORE pooling the
+		// session, so a concurrent reuse can safely re-register its own.
+		b.notifs.Delete(sessionID)
+		b.returnSession(poolKey, sessionID)
+
+		b.logger.Info().
+			Str("session_id", sessionID).
+			Str("model", req.Model).
+			Str("stop_reason", res.stopReason).
+			Bool("reused", reused).
+			Dur("duration", time.Since(start)).
+			Msg("ACP session complete")
 	}()
 
 	return events, nil
@@ -239,25 +289,55 @@ func (b *ACPBackend) Complete(ctx context.Context, req *Request) (<-chan streami
 // ACP method calls
 // ---------------------------------------------------------------------------
 
+// acpProtocolVersion is the Agent Client Protocol version the gateway speaks.
+// ProtocolVersion is an integer in ACP; kiro-cli 2.8.1 negotiates version 1.
+const acpProtocolVersion = 1
+
 func (b *ACPBackend) initialize() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	params := map[string]any{
-		"protocolVersion": "2025-03-26",
-		"capabilities":    map[string]any{},
+		"protocolVersion": acpProtocolVersion,
+		"clientCapabilities": map[string]any{
+			"fs":       map[string]any{"readTextFile": false, "writeTextFile": false},
+			"terminal": false,
+		},
 		"clientInfo": map[string]any{
 			"name":    "go-kiro-gateway",
 			"version": "1.0",
 		},
 	}
-	_, err := b.call(ctx, "initialize", params)
-	return err
+	result, err := b.call(ctx, "initialize", params)
+	if err != nil {
+		return err
+	}
+
+	// Log the negotiated protocol version; fail fast on an unsupported newer one.
+	var r struct {
+		ProtocolVersion int `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return fmt.Errorf("acp: parse initialize result: %w", err)
+	}
+	b.logger.Info().Int("protocol_version", r.ProtocolVersion).Msg("ACP protocol negotiated")
+	if r.ProtocolVersion > acpProtocolVersion {
+		return fmt.Errorf(
+			"acp: kiro-cli requires protocol version %d but the gateway supports %d; please update go-kiro-gateway",
+			r.ProtocolVersion, acpProtocolVersion,
+		)
+	}
+	return nil
 }
 
 func (b *ACPBackend) sessionNew(ctx context.Context) (string, error) {
 	cwd, _ := os.Getwd()
-	result, err := b.call(ctx, "session/new", map[string]any{"cwd": cwd})
+	// cwd and mcpServers are both required by ACP session/new. Omitting
+	// mcpServers makes kiro-cli's deserialize fail and the subprocess exit.
+	result, err := b.call(ctx, "session/new", map[string]any{
+		"cwd":        cwd,
+		"mcpServers": []any{},
+	})
 	if err != nil {
 		return "", err
 	}
@@ -270,26 +350,184 @@ func (b *ACPBackend) sessionNew(ctx context.Context) (string, error) {
 	return r.SessionID, nil
 }
 
-func (b *ACPBackend) sessionSetModel(ctx context.Context, sessionID, model string) error {
-	_, err := b.call(ctx, "session/set_model", map[string]any{
-		"sessionId": sessionID,
-		"model":     model,
-	})
+// checkoutSession returns a session ready for a fresh turn for the given model
+// key, reusing a cleared idle pooled session when one is available or creating a
+// new one otherwise. The returned poolKey is the model the session actually has
+// selected (it falls back to "" if a requested model was unavailable) and must
+// be the key used when returning the session to the pool.
+func (b *ACPBackend) checkoutSession(ctx context.Context, key string) (sessionID, poolKey string, reused bool, err error) {
+	if id, ok := b.popIdle(key); ok {
+		// Wipe prior context before reuse. A failure (including subprocess exit)
+		// means the session is dead/poisoned — drop it and create a fresh one.
+		if cerr := b.clearSession(ctx, id); cerr == nil {
+			return id, key, true, nil
+		}
+		b.logger.Warn().Str("session_id", id).Msg("ACP: /clear failed on pooled session, creating a new one")
+	}
+
+	id, err := b.sessionNew(ctx)
+	if err != nil {
+		return "", "", false, fmt.Errorf("acp: session/new failed: %w", err)
+	}
+	poolKey = key
+	if key != "" {
+		if serr := b.selectModelKiro(ctx, id, key); serr != nil {
+			b.logger.Warn().Err(serr).Str("model", key).Msg("model selection failed, using session default")
+			poolKey = "" // session is on the default model now
+		}
+	}
+	return id, poolKey, false, nil
+}
+
+// popIdle removes and returns one idle session for key, if any.
+func (b *ACPBackend) popIdle(key string) (string, bool) {
+	b.poolMu.Lock()
+	defer b.poolMu.Unlock()
+	ids := b.idleByModel[key]
+	if len(ids) == 0 {
+		return "", false
+	}
+	id := ids[len(ids)-1]
+	b.idleByModel[key] = ids[:len(ids)-1]
+	return id, true
+}
+
+// returnSession pools a session for reuse under key, dropping it when the idle
+// pool for that key is full. With maxIdle == 0 every session is dropped, which
+// reduces to the per-request behavior (no reuse).
+func (b *ACPBackend) returnSession(key, sessionID string) {
+	b.poolMu.Lock()
+	defer b.poolMu.Unlock()
+	if len(b.idleByModel[key]) >= b.maxIdle {
+		return
+	}
+	b.idleByModel[key] = append(b.idleByModel[key], sessionID)
+}
+
+// clearSession wipes a session's conversation history via the /clear command.
+func (b *ACPBackend) clearSession(ctx context.Context, sessionID string) error {
+	_, err := b.runCommandTurn(ctx, sessionID, "/clear")
 	return err
 }
 
-// sessionPrompt sends a session/prompt request. kiro-cli responds with an
-// immediate JSON-RPC ack, then streams session/notification messages
-// asynchronously. If kiro-cli does not ack (e.g. protocol mismatch), this
-// call will block until ctx is cancelled.
-func (b *ACPBackend) sessionPrompt(ctx context.Context, sessionID, text string) error {
-	_, err := b.call(ctx, "session/prompt", map[string]any{
+// selectModelKiro switches the session to kiroModel (already in kiro-cli's
+// naming) via the `/model` slash command. kiro-cli has no session/set_model
+// method (sending one crashes the subprocess), so selection is just another
+// prompt turn whose output is discarded.
+func (b *ACPBackend) selectModelKiro(ctx context.Context, sessionID, kiroModel string) error {
+	out, err := b.runCommandTurn(ctx, sessionID, "/model "+kiroModel)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(strings.ToLower(out), "not found") {
+		return fmt.Errorf("acp: model %q unavailable: %s", kiroModel, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// modelKey maps a gateway model ID to the pool key (kiro model id), normalizing
+// empty/"auto" to "" (the session default, which skips /model selection).
+func modelKey(gatewayModel string) string {
+	k := toKiroModelID(gatewayModel)
+	if k == "auto" {
+		return ""
+	}
+	return k
+}
+
+// runCommandTurn sends text as a complete prompt turn and returns the
+// concatenated agent text plus any error. Streamed updates are consumed but not
+// forwarded — used for kiro slash commands like /model. It mirrors the
+// concurrent prompt/drain model of Complete: the prompt response (stopReason)
+// signals turn completion, so the prompt is driven on its own goroutine while
+// this function drains updates.
+func (b *ACPBackend) runCommandTurn(ctx context.Context, sessionID, text string) (string, error) {
+	notifCh := make(chan *SessionNotification, 64)
+	b.notifs.Store(sessionID, notifCh)
+	defer b.notifs.Delete(sessionID)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.sessionPrompt(ctx, sessionID, text)
+		done <- err
+	}()
+
+	var sb strings.Builder
+	collect := func(n *SessionNotification) {
+		if u, err := ParseUpdate(n.Update); err == nil {
+			if c, ok := u.(*AgentMessageChunk); ok {
+				sb.WriteString(c.Content.Text)
+			}
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return sb.String(), ctx.Err()
+		case <-b.done:
+			return sb.String(), fmt.Errorf("acp: subprocess exited during command turn")
+		case n := <-notifCh:
+			collect(n)
+		case err := <-done:
+			for drained := false; !drained; {
+				select {
+				case n := <-notifCh:
+					collect(n)
+				default:
+					drained = true
+				}
+			}
+			return sb.String(), err
+		}
+	}
+}
+
+// toKiroModelID maps a gateway model ID to kiro-cli's naming, which uses a dot
+// before the version (e.g. claude-sonnet-4-6 → claude-sonnet-4.6). Names whose
+// final two hyphen-separated segments aren't both numeric (e.g. claude-sonnet-4,
+// auto) are returned unchanged.
+func toKiroModelID(model string) string {
+	parts := strings.Split(model, "-")
+	n := len(parts)
+	if n >= 2 && isAllDigits(parts[n-1]) && isAllDigits(parts[n-2]) {
+		return strings.Join(parts[:n-1], "-") + "." + parts[n-1]
+	}
+	return model
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// sessionPrompt sends a session/prompt request and returns the turn's
+// stopReason. In ACP, kiro-cli streams session/update notifications while the
+// turn runs and only responds to this request once the turn ends — so the
+// response (carrying stopReason) is the completion signal, not a notification.
+// Callers must therefore drive this concurrently with the notification drain.
+func (b *ACPBackend) sessionPrompt(ctx context.Context, sessionID, text string) (string, error) {
+	result, err := b.call(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
-		"content": []map[string]any{
+		"prompt": []map[string]any{
 			{"type": "text", "text": text},
 		},
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+	var r PromptResponse
+	if err := json.Unmarshal(result, &r); err != nil {
+		return "", fmt.Errorf("acp: parse session/prompt result: %w", err)
+	}
+	return r.StopReason, nil
 }
 
 func (b *ACPBackend) sessionCancel(ctx context.Context, sessionID string) error {
@@ -361,11 +599,11 @@ func (b *ACPBackend) dispatchLoop() {
 			if ch, ok := b.pending.Load(msg.ID); ok {
 				ch.(chan *rpcMessage) <- msg
 			}
-		} else if msg.Method == "session/notification" {
+		} else if msg.Method == "session/update" {
 			// Notification — route to the matching session channel.
 			var notif SessionNotification
 			if err := json.Unmarshal(msg.Params, &notif); err != nil {
-				b.logger.Warn().Err(err).Msg("ACP: failed to parse session/notification params")
+				b.logger.Warn().Err(err).Msg("ACP: failed to parse session/update params")
 				continue
 			}
 			if ch, ok := b.notifs.Load(notif.SessionID); ok {
@@ -410,9 +648,21 @@ func (b *ACPBackend) drainStderr(r io.Reader) {
 	}
 }
 
-// extractPromptText pulls the last user message text from a Kiro-format payload.
-// Falls back to a serialised JSON representation if structure is unexpected.
+// extractPromptText pulls the prompt text the gateway should send to kiro-cli.
+// The backend receives the Kiro/CodeWhisperer payload, so the primary path
+// reads conversationState.currentMessage.userInputMessage.content. The legacy
+// OpenAI-style messages walk is kept as a fallback for callers that pass it.
 func extractPromptText(payload map[string]any) string {
+	if cs, ok := payload["conversationState"].(map[string]any); ok {
+		if cm, ok := cs["currentMessage"].(map[string]any); ok {
+			if uim, ok := cm["userInputMessage"].(map[string]any); ok {
+				if c, ok := uim["content"].(string); ok && c != "" {
+					return c
+				}
+			}
+		}
+	}
+
 	msgs, ok := payload["messages"].([]any)
 	if !ok || len(msgs) == 0 {
 		return ""
