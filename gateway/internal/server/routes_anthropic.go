@@ -108,6 +108,15 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Convert thinking config if provided.
+	var thinkingConfig *converter.ThinkingConfig
+	if req.Thinking != nil {
+		thinkingConfig = &converter.ThinkingConfig{
+			Type:         req.Thinking.Type,
+			BudgetTokens: req.Thinking.BudgetTokens,
+		}
+	}
+
 	payloadResult, err := converter.BuildKiroPayload(converter.BuildKiroPayloadOptions{
 		Messages:       converted.Messages,
 		SystemPrompt:   converted.SystemPrompt,
@@ -116,6 +125,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		ConversationID: conversationID,
 		ProfileARN:     profileARN,
 		InjectThinking: true,
+		Thinking:       thinkingConfig,
 		Cfg:            s.config,
 	})
 	if err != nil {

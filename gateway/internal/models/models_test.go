@@ -577,10 +577,69 @@ func TestAnthropicMessagesRequest_NilOptionalFields_Omitted(t *testing.T) {
 		t.Fatalf("unmarshal raw: %v", err)
 	}
 
-	for _, field := range []string{"temperature", "top_p", "top_k", "system", "tools", "tool_choice"} {
+	for _, field := range []string{"temperature", "top_p", "top_k", "system", "tools", "tool_choice", "thinking"} {
 		if _, exists := raw[field]; exists {
 			t.Errorf("field %q should be absent when nil/zero (omitempty)", field)
 		}
+	}
+}
+
+func TestAnthropicMessagesRequest_ThinkingConfig(t *testing.T) {
+	jsonData := `{
+		"model": "claude-sonnet-4-20250514",
+		"max_tokens": 16000,
+		"thinking": {
+			"type": "enabled",
+			"budget_tokens": 10000
+		},
+		"messages": [{"role": "user", "content": "Hello"}]
+	}`
+
+	var req AnthropicMessagesRequest
+	if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if req.Thinking == nil {
+		t.Fatal("expected Thinking to be parsed")
+	}
+	if req.Thinking.Type != "enabled" {
+		t.Errorf("Thinking.Type = %q, want %q", req.Thinking.Type, "enabled")
+	}
+	if req.Thinking.BudgetTokens != 10000 {
+		t.Errorf("Thinking.BudgetTokens = %d, want %d", req.Thinking.BudgetTokens, 10000)
+	}
+}
+
+func TestAnthropicMessagesRequest_ThinkingConfig_RoundTrip(t *testing.T) {
+	req := AnthropicMessagesRequest{
+		Model:     "claude-sonnet-4-20250514",
+		Messages:  []AnthropicMessage{{Role: "user", Content: "hi"}},
+		MaxTokens: 16000,
+		Thinking: &ThinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: 10000,
+		},
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got AnthropicMessagesRequest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.Thinking == nil {
+		t.Fatal("expected Thinking to survive round-trip")
+	}
+	if got.Thinking.Type != "enabled" {
+		t.Errorf("Thinking.Type = %q, want %q", got.Thinking.Type, "enabled")
+	}
+	if got.Thinking.BudgetTokens != 10000 {
+		t.Errorf("Thinking.BudgetTokens = %d, want %d", got.Thinking.BudgetTokens, 10000)
 	}
 }
 

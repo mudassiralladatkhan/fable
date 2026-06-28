@@ -33,6 +33,15 @@ type AnthropicMessagesRequest struct {
 	Temperature *float64           `json:"temperature,omitempty"`
 	TopP        *float64           `json:"top_p,omitempty"`
 	TopK        *int               `json:"top_k,omitempty"`
+	Thinking    *ThinkingConfig    `json:"thinking,omitempty"`
+}
+
+// ThinkingConfig represents the Anthropic extended thinking configuration.
+// When Type is "enabled", BudgetTokens specifies the maximum tokens for
+// internal reasoning. When Type is "disabled", extended thinking is off.
+type ThinkingConfig struct {
+	Type         string `json:"type"`                    // "enabled" | "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // required when type is "enabled"
 }
 
 // AnthropicMessage represents a single message in the Anthropic chat format.

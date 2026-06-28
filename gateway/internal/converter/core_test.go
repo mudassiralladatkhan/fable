@@ -922,6 +922,66 @@ func TestBuildKiroPayload_ThinkingInjection(t *testing.T) {
 	}
 }
 
+func TestBuildKiroPayload_NativeThinkingConfig(t *testing.T) {
+	cfg := testCfg()
+	cfg.FakeReasoningEnabled = false
+
+	result, err := BuildKiroPayload(BuildKiroPayloadOptions{
+		Messages:       []UnifiedMessage{{Role: "user", Content: "Hello"}},
+		ConversationID: "c1",
+		InjectThinking: false,
+		Thinking: &ThinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: 10000,
+		},
+		Cfg: cfg,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	convState := result.Payload["conversationState"].(map[string]any)
+	currentMsg := convState["currentMessage"].(map[string]any)
+	userInput := currentMsg["userInputMessage"].(map[string]any)
+
+	thinking, ok := userInput["thinking"].(map[string]any)
+	if !ok {
+		t.Fatal("expected thinking config in userInputMessage")
+	}
+	if thinking["type"] != "enabled" {
+		t.Errorf("thinking type = %v, want enabled", thinking["type"])
+	}
+	if thinking["budget_tokens"] != 10000 {
+		t.Errorf("thinking budget_tokens = %v, want 10000", thinking["budget_tokens"])
+	}
+}
+
+func TestBuildKiroPayload_NativeThinkingConfigDisabled(t *testing.T) {
+	cfg := testCfg()
+	cfg.FakeReasoningEnabled = false
+
+	result, err := BuildKiroPayload(BuildKiroPayloadOptions{
+		Messages:       []UnifiedMessage{{Role: "user", Content: "Hello"}},
+		ConversationID: "c1",
+		InjectThinking: false,
+		Thinking: &ThinkingConfig{
+			Type: "disabled",
+		},
+		Cfg: cfg,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	convState := result.Payload["conversationState"].(map[string]any)
+	currentMsg := convState["currentMessage"].(map[string]any)
+	userInput := currentMsg["userInputMessage"].(map[string]any)
+
+	if _, ok := userInput["thinking"]; ok {
+		t.Fatal("thinking config should not be present when type is disabled")
+	}
+}
+
 func TestBuildKiroPayload_SystemPromptNoHistory(t *testing.T) {
 	cfg := testCfg()
 	cfg.FakeReasoningEnabled = false

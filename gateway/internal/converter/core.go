@@ -64,7 +64,16 @@ type BuildKiroPayloadOptions struct {
 	ConversationID string
 	ProfileARN     string
 	InjectThinking bool
+	Thinking       *ThinkingConfig // Native extended thinking configuration
 	Cfg            *config.Config
+}
+
+// ThinkingConfig represents the extended thinking configuration passed through
+// to Kiro. When Type is "enabled", BudgetTokens specifies the maximum tokens
+// for internal reasoning.
+type ThinkingConfig struct {
+	Type         string // "enabled" | "disabled"
+	BudgetTokens int    // required when type is "enabled"
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +245,13 @@ func BuildKiroPayload(opts BuildKiroPayloadOptions) (*KiroPayloadResult, error) 
 	}
 	if len(userInputCtx) > 0 {
 		userInputMessage["userInputMessageContext"] = userInputCtx
+	}
+	// Add native extended thinking configuration if provided.
+	if opts.Thinking != nil && opts.Thinking.Type == "enabled" {
+		userInputMessage["thinking"] = map[string]any{
+			"type":         opts.Thinking.Type,
+			"budget_tokens": opts.Thinking.BudgetTokens,
+		}
 	}
 
 	// Assemble final payload.
