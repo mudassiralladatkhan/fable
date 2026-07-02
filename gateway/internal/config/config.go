@@ -163,12 +163,17 @@ func Load() (*Config, error) {
 		"claude-3.5-sonnet": "claude-sonnet-4.5",
 	})
 	cfg.ModelAliases = envJSONMap("MODEL_ALIASES", map[string]string{
-		"auto-kiro":          "claude-opus-4.8",
-		"auto":               "claude-opus-4.8",
-		"claude-sonnet-4-5":  "claude-3-5-sonnet",
-		"claude-sonnet-4.5":  "claude-3-5-sonnet",
-		"claude-4-5-sonnet":  "claude-3-5-sonnet",
-		"claude-4.5-sonnet":  "claude-3-5-sonnet",
+		"auto-kiro":                  "claude-opus-4.8",
+		"auto":                       "claude-opus-4.8",
+		"claude-sonnet-4-5":          "claude-3-5-sonnet",
+		"claude-sonnet-4.5":          "claude-3-5-sonnet",
+		"claude-4-5-sonnet":          "claude-3-5-sonnet",
+		"claude-4.5-sonnet":          "claude-3-5-sonnet",
+		"claude-3-opus-20240229":     "claude-opus-4.8",
+		"claude-3-opus":              "claude-opus-4.8",
+		"claude-3-5-sonnet-20241022": "claude-3-5-sonnet",
+		"claude-3-5-sonnet-20240620": "claude-3-5-sonnet",
+		"claude-3-5-sonnet":          "claude-3-5-sonnet",
 	})
 	cfg.HiddenFromList = envCommaSeparated("HIDDEN_FROM_LIST", []string{"auto"})
 	cfg.FallbackModels = defaultFallbackModels()
