@@ -46,9 +46,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		for _, id := range modelIDs {
 			displayName := id
 			if id == "claude-opus-4-8" || id == "claude-opus-4.8" {
-				displayName = "Claude 3.5 Opus"
+				displayName = "Claude Opus 4.8"
 			} else if id == "claude-sonnet-4-5" || id == "claude-sonnet-4.5" {
-				displayName = "Claude 3.5 Sonnet"
+				displayName = "Claude Sonnet 4.5"
 			}
 
 			data = append(data, map[string]any{
