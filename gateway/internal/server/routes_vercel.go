@@ -40,7 +40,7 @@ func (s *Server) handleVercelMessages(
 
 	vercelURL := s.config.VercelURL
 	if vercelURL == "" {
-		vercelURL = "https://ai-gateway.vercel.sh/v1/messages"
+		vercelURL = "https://api.v0.dev/v1/messages"
 	} else if !strings.HasSuffix(vercelURL, "/messages") {
 		if strings.HasSuffix(vercelURL, "/") {
 			vercelURL += "messages"
