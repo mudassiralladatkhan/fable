@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=linux \
 # ---------------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------------
-FROM alpine:3.23
+FROM alpine:3.24
 
 # Install CA certificates, curl for health checks, and poppler-utils for PDF rendering.
 RUN apk add --no-cache ca-certificates curl poppler-utils
