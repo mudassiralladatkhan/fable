@@ -27,7 +27,27 @@ func TestMessages_VercelBackend(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"type": "message", "id": "msg_vercel_123", "role": "assistant", "content": [{"type": "text", "text": "hello from vercel"}], "model": "anthropic/claude-fable-5"}`))
+		w.Write([]byte(`{
+			"id": "vercel_123",
+			"object": "chat.completion",
+			"created": 1677652288,
+			"model": "anthropic/claude-fable-5",
+			"choices": [
+				{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						"content": "hello from vercel"
+					},
+					"finish_reason": "stop"
+				}
+			],
+			"usage": {
+				"prompt_tokens": 10,
+				"completion_tokens": 10,
+				"total_tokens": 20
+			}
+		}`))
 	}))
 	defer vercelMock.Close()
 
@@ -83,6 +103,16 @@ func TestMessages_VercelBackend(t *testing.T) {
 		t.Errorf("expected model to be mapped to anthropic/claude-fable-5, got %v", capturedBody["model"])
 	}
 
+	// Verify it was translated to OpenAI messages format
+	messages, ok := capturedBody["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		t.Fatalf("expected translated messages list, got %v", capturedBody["messages"])
+	}
+	firstMsg := messages[0].(map[string]any)
+	if firstMsg["role"] != "user" || firstMsg["content"] != "hello" {
+		t.Errorf("expected first message to be role:user, content:hello, got %v", firstMsg)
+	}
+
 	var resp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to parse response: %v", err)
@@ -90,6 +120,15 @@ func TestMessages_VercelBackend(t *testing.T) {
 
 	if resp["id"] != "msg_vercel_123" {
 		t.Errorf("expected id msg_vercel_123, got %v", resp["id"])
+	}
+
+	contentList, ok := resp["content"].([]any)
+	if !ok || len(contentList) == 0 {
+		t.Fatalf("expected content array in response, got %v", resp["content"])
+	}
+	firstContent := contentList[0].(map[string]any)
+	if firstContent["type"] != "text" || firstContent["text"] != "hello from vercel" {
+		t.Errorf("expected text: 'hello from vercel', got %v", firstContent)
 	}
 }
 
@@ -106,11 +145,9 @@ func TestMessages_VercelBackend_Streaming(t *testing.T) {
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
 		
-		// Write simulated SSE events
-		w.Write([]byte("event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_vercel_stream_123\"}}\n\n"))
-		w.Write([]byte("event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0}\n\n"))
-		w.Write([]byte("event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"hello from vercel stream\"}}\n\n"))
-		w.Write([]byte("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"))
+		// Write simulated OpenAI SSE events
+		w.Write([]byte("data: {\"id\": \"vercel_stream_123\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"hello from vercel stream\"}, \"finish_reason\": null}]}\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer vercelMock.Close()
 
@@ -180,4 +217,3 @@ func TestMessages_VercelBackend_Streaming(t *testing.T) {
 		t.Errorf("expected hello from vercel stream content, got: %s", responseBody)
 	}
 }
-
